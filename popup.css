@@ -210,3 +210,67 @@ footer {
 .status.error {
   color: var(--danger);
 }
+
+/* AI Mode Styles */
+.ai-mode {
+  padding: 10px 12px;
+}
+
+.ai-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.back-btn {
+  flex: 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.ai-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--primary);
+}
+
+.ai-content {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-content .row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.ai-content .row .label {
+  font-size: 13px;
+}
+
+.ai-content input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--fg);
+  font-size: 13px;
+}
+
+/* Hide elements when in AI mode */
+body.ai-mode-active .settings:not(.ai-mode),
+body.ai-mode-active .summary,
+body.ai-mode-active .lists {
+  display: none;
+}
+
+body:not(.ai-mode-active) .ai-mode {
+  display: none;
+}

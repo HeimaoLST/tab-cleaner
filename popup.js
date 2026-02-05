@@ -1,6 +1,8 @@
 const els = {
   preset: document.getElementById('preset'),
   decisionEngine: document.getElementById('decisionEngine'),
+  dashscopeApiKey: document.getElementById('dashscopeApiKey'),
+  btnBack: document.getElementById('btnBack'),
   maxClosePerRun: document.getElementById('maxClosePerRun'),
   keepPinned: document.getElementById('keepPinned'),
   closeOldTempTabsMinutes: document.getElementById('closeOldTempTabsMinutes'),
@@ -45,6 +47,15 @@ const PRESETS = {
     maxClosePerRun: 10,
     groupMinSize: 2,
   },
+  ai_clean: {
+    // AI Clean mode: no closing, only grouping decided by AI
+    staleMinutesToConsider: 0,
+    lowValueCloseThreshold: 1.0, // Never close (threshold above max score)
+    minTabAgeMinutesForLowValueClose: 999999,
+    frequentHostActivateCountForGrouping: 0,
+    maxClosePerRun: 0,
+    groupMinSize: 2,
+  },
 };
 
 function numberOrUndefined(inputEl) {
@@ -79,41 +90,55 @@ async function send(msg) {
   return await chrome.runtime.sendMessage(msg);
 }
 
+async function getStoredApiKey() {
+  const res = await send({ type: 'get_api_key' });
+  return res?.apiKey || '';
+}
+
+async function saveApiKey(key) {
+  await send({ type: 'set_api_key', apiKey: key });
+}
+
 function readSettingsFromUI() {
+  const presetValue = String(els.preset?.value || 'balanced');
+  const isAiClean = presetValue === 'ai_clean';
+
   const patch = {
-    preset: String(els.preset?.value || 'balanced'),
-    decisionEngine: String(els.decisionEngine?.value || 'rules'),
+    preset: presetValue,
+    decisionEngine: isAiClean ? 'ai_clean' : String(els.decisionEngine?.value || 'rules'),
     keepPinned: els.keepPinned.checked,
   };
 
-  const maxClosePerRun = numberOrUndefined(els.maxClosePerRun);
-  if (maxClosePerRun !== undefined) patch.maxClosePerRun = maxClosePerRun;
+  if (!isAiClean) {
+    const maxClosePerRun = numberOrUndefined(els.maxClosePerRun);
+    if (maxClosePerRun !== undefined) patch.maxClosePerRun = maxClosePerRun;
 
-  const closeOldTempTabsMinutes = numberOrUndefined(els.closeOldTempTabsMinutes);
-  if (closeOldTempTabsMinutes !== undefined) patch.closeOldTempTabsMinutes = closeOldTempTabsMinutes;
+    const closeOldTempTabsMinutes = numberOrUndefined(els.closeOldTempTabsMinutes);
+    if (closeOldTempTabsMinutes !== undefined) patch.closeOldTempTabsMinutes = closeOldTempTabsMinutes;
 
-  const closeOldAuthTabsMinutes = numberOrUndefined(els.closeOldAuthTabsMinutes);
-  if (closeOldAuthTabsMinutes !== undefined) patch.closeOldAuthTabsMinutes = closeOldAuthTabsMinutes;
+    const closeOldAuthTabsMinutes = numberOrUndefined(els.closeOldAuthTabsMinutes);
+    if (closeOldAuthTabsMinutes !== undefined) patch.closeOldAuthTabsMinutes = closeOldAuthTabsMinutes;
 
-  const staleMinutesToConsider = numberOrUndefined(els.staleMinutesToConsider);
-  if (staleMinutesToConsider !== undefined) patch.staleMinutesToConsider = staleMinutesToConsider;
+    const staleMinutesToConsider = numberOrUndefined(els.staleMinutesToConsider);
+    if (staleMinutesToConsider !== undefined) patch.staleMinutesToConsider = staleMinutesToConsider;
 
-  const lowValueCloseThreshold = numberOrUndefined(els.lowValueCloseThreshold);
-  if (lowValueCloseThreshold !== undefined) patch.lowValueCloseThreshold = lowValueCloseThreshold;
+    const lowValueCloseThreshold = numberOrUndefined(els.lowValueCloseThreshold);
+    if (lowValueCloseThreshold !== undefined) patch.lowValueCloseThreshold = lowValueCloseThreshold;
 
-  const frequentHostActivateCountForGrouping = numberOrUndefined(els.frequentHostActivateCountForGrouping);
-  if (frequentHostActivateCountForGrouping !== undefined)
-    patch.frequentHostActivateCountForGrouping = frequentHostActivateCountForGrouping;
+    const frequentHostActivateCountForGrouping = numberOrUndefined(els.frequentHostActivateCountForGrouping);
+    if (frequentHostActivateCountForGrouping !== undefined)
+      patch.frequentHostActivateCountForGrouping = frequentHostActivateCountForGrouping;
 
-  const minTabAgeMinutesForLowValueClose = numberOrUndefined(els.minTabAgeMinutesForLowValueClose);
-  if (minTabAgeMinutesForLowValueClose !== undefined)
-    patch.minTabAgeMinutesForLowValueClose = minTabAgeMinutesForLowValueClose;
+    const minTabAgeMinutesForLowValueClose = numberOrUndefined(els.minTabAgeMinutesForLowValueClose);
+    if (minTabAgeMinutesForLowValueClose !== undefined)
+      patch.minTabAgeMinutesForLowValueClose = minTabAgeMinutesForLowValueClose;
 
-  const groupMinSize = numberOrUndefined(els.groupMinSize);
-  if (groupMinSize !== undefined) patch.groupMinSize = groupMinSize;
+    const groupMinSize = numberOrUndefined(els.groupMinSize);
+    if (groupMinSize !== undefined) patch.groupMinSize = groupMinSize;
 
-  const candidateLimit = numberOrUndefined(els.candidateLimit);
-  if (candidateLimit !== undefined) patch.candidateLimit = candidateLimit;
+    const candidateLimit = numberOrUndefined(els.candidateLimit);
+    if (candidateLimit !== undefined) patch.candidateLimit = candidateLimit;
+  }
 
   return patch;
 }
@@ -145,8 +170,25 @@ function applyPresetToUI(name) {
   els.groupMinSize.value = String(preset.groupMinSize);
 }
 
+function updateSettingsVisibility(isAiClean) {
+  // Toggle body class for CSS-based visibility
+  document.body.classList.toggle('ai-mode-active', isAiClean);
+
+  // Show/hide Preview button in AI Clean mode (not needed)
+  if (els.btnPreview) {
+    els.btnPreview.style.display = isAiClean ? 'none' : '';
+  }
+
+  // Change Apply button text
+  if (els.btnApply) {
+    els.btnApply.textContent = isAiClean ? 'Clean' : 'Tidy now';
+  }
+}
+
 function renderPlan(plan) {
   const s = plan?.stats;
+  const isAiClean = plan?.settings?.preset === 'ai_clean';
+
   if (!s) {
     els.summary.textContent = '';
   } else {
@@ -154,24 +196,31 @@ function renderPlan(plan) {
     const settings = plan?.settings ?? {};
     els.summary.innerHTML = [
       `<span class="pill">Tabs: ${escapeHtml(s.totalTabs)}</span>`,
-      `<span class="pill">Close: ${escapeHtml(s.toClose)}</span>`,
+      isAiClean
+        ? `<span class="pill" style="border-color: var(--primary)">AI Clean Mode</span>`
+        : `<span class="pill">Close: ${escapeHtml(s.toClose)}</span>`,
       `<span class="pill">Groups: ${escapeHtml(s.groups)}</span>`,
       `<span class="pill">Strategy: ${escapeHtml(debug.tabQueryStrategy ?? '-') }</span>`,
-      `<span class="pill">Engine: ${escapeHtml(debug.decisionEngine ?? '-') }</span>`,
-      `<span class="pill">stale≥${escapeHtml(settings.staleMinutesToConsider ?? '-') }m</span>`,
-      `<span class="pill">close&lt;${escapeHtml(settings.lowValueCloseThreshold ?? '-') }</span>`,
-      `<span class="pill">host≥${escapeHtml(settings.frequentHostActivateCountForGrouping ?? '-') }</span>`,
-      `<span class="pill">maxClose:${escapeHtml(settings.maxClosePerRun ?? '-') }</span>`,
-    ].join(' ');
+      isAiClean ? '' : `<span class="pill">Engine: ${escapeHtml(debug.decisionEngine ?? '-') }</span>`,
+    ].filter(Boolean).join(' ');
   }
 
   const actions = Array.isArray(plan?.actions) ? plan.actions : [];
 
+  // For AI Clean mode, we don't show close candidates
   const closes = [];
   for (const a of actions) {
     if (a?.type !== 'close_tabs') continue;
     if (Array.isArray(a.items)) closes.push(...a.items);
   }
+
+  const closeDetails = els.closeList?.closest('details');
+  if (closeDetails && isAiClean) {
+    closeDetails.style.display = 'none';
+  } else if (closeDetails) {
+    closeDetails.style.display = '';
+  }
+
   els.closeList.innerHTML = closes.length
     ? closes
         .slice(0, 30)
@@ -211,7 +260,7 @@ function renderPlan(plan) {
           `
         )
         .join('')
-    : `<div class="item"><div class="title">Nothing to group</div></div>`;
+    : `<div class="item"><div class="title">${isAiClean ? 'AI will suggest groups' : 'Nothing to group'}</div></div>`;
 }
 
 async function preview() {
@@ -234,16 +283,29 @@ async function preview() {
 
 async function apply() {
   setBusy(true);
-  setStatus('Tidying…');
+  const isAiClean = els.preset?.value === 'ai_clean';
+  setStatus(isAiClean ? 'AI is thinking…' : 'Tidy now…');
   try {
     const patch = readSettingsFromUI();
     await send({ type: 'set_settings', patch });
-    const plan = window.__lastPlan;
-    const res = await send({ type: 'apply', plan });
-    if (!res?.ok) throw new Error(res?.error || 'apply_failed');
-    renderPlan(res.after);
-    setStatus('Done');
-    window.__lastPlan = null;
+
+    // Always generate a fresh plan to ensure settings are applied
+    const planRes = await send({ type: 'plan' });
+    if (!planRes?.ok) throw new Error(planRes?.error || 'plan_failed');
+    window.__lastPlan = planRes.plan;
+
+    // Show preview for non-AI modes
+    if (!isAiClean) {
+      renderPlan(planRes.plan);
+      setStatus('Ready - review and click Tidy now');
+    } else {
+      // For AI mode, apply immediately
+      const res = await send({ type: 'apply', plan: planRes.plan });
+      if (!res?.ok) throw new Error(res?.error || 'apply_failed');
+      renderPlan(res.after);
+      setStatus('Done! Tabs grouped by AI.');
+      window.__lastPlan = null;
+    }
   } catch (e) {
     setStatus(String(e?.message || e), { error: true });
   } finally {
@@ -270,10 +332,28 @@ async function init() {
   setBusy(true);
   setStatus('Loading…');
   try {
+    // Load API key
+    const storedApiKey = await getStoredApiKey();
+    if (els.dashscopeApiKey) {
+      els.dashscopeApiKey.value = storedApiKey;
+      els.dashscopeApiKey.addEventListener('change', async () => {
+        await saveApiKey(els.dashscopeApiKey.value);
+      });
+    }
+
     const res = await send({ type: 'get_settings' });
     if (!res?.ok) throw new Error(res?.error || 'get_settings_failed');
     applySettingsToUI(res.settings);
-    await preview();
+
+    const isAiClean = els.preset?.value === 'ai_clean';
+    updateSettingsVisibility(isAiClean);
+
+    if (isAiClean) {
+      // For AI mode, apply immediately without preview
+      await apply();
+    } else {
+      await preview();
+    }
   } catch (e) {
     setStatus(String(e?.message || e), { error: true });
   } finally {
@@ -285,10 +365,31 @@ els.btnPreview.addEventListener('click', preview);
 els.btnApply.addEventListener('click', apply);
 els.btnUndo.addEventListener('click', undo);
 
+// Back button - return to main menu
+els.btnBack?.addEventListener('click', async () => {
+  els.preset.value = 'balanced';
+  updateSettingsVisibility(false);
+  setStatus('Mode: balanced');
+  await preview();
+});
+
 els.preset?.addEventListener('change', async () => {
   const name = String(els.preset.value || 'balanced');
-  applyPresetToUI(name);
+  const isAiClean = name === 'ai_clean';
+
+  if (!isAiClean) {
+    applyPresetToUI(name);
+  }
+
+  updateSettingsVisibility(isAiClean);
   setStatus(`Mode: ${name}`);
+
+  if (isAiClean) {
+    // AI Clean mode - auto apply
+    await apply();
+  } else {
+    await preview();
+  }
 });
 
 init();
