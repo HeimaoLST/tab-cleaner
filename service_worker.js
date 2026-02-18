@@ -33,12 +33,101 @@ const DEFAULT_SETTINGS = {
   ],
 };
 
+async function getDashscopeApiKey() {
+  const data = await chrome.storage.local.get([STORAGE_KEYS.dashscopeApiKey]);
+  return data[STORAGE_KEYS.dashscopeApiKey] || '';
+}
+
+async function callQwenForGrouping(tabs, apiKey) {
+  if (!apiKey || apiKey.trim() === '') {
+    throw new Error('API key not configured');
+  }
+
+  // Sanitize API key - remove any non-ASCII characters
+  const cleanApiKey = apiKey.replace(/[^\x20-\x7E]/g, '').trim();
+  if (!cleanApiKey) {
+    throw new Error('API key contains invalid characters');
+  }
+
+  const tabInfo = tabs
+    .filter((t) => t?.id && t?.url && (t.url.startsWith('http://') || t.url.startsWith('https://')))
+    .map((t) => ({
+      id: t.id,
+      title: (t.title || 'Untitled').replace(/[^\x20-\x7E\x80-\xFF]/g, '').substring(0, 200),
+      url: t.url,
+      hostname: new URL(t.url).hostname,
+    }));
+
+  if (tabInfo.length < 2) {
+    return [];
+  }
+
+  // Use English-only prompt to avoid encoding issues
+  const prompt = `You are a tab organization assistant. Analyze browser tabs and suggest groups.
+
+Rules:
+1. Group tabs that are related or about the same topic/project
+2. Use simple group names based on domain or topic
+3. Each group must have at least 2 tabs
+4. Return ONLY groups, NO closing
+5. Group same-domain tabs together (GitHub, YouTube, etc.)
+
+Tabs to analyze:
+${JSON.stringify(tabInfo, null, 2)}
+
+Respond with JSON array:
+[
+  {"title": "Group Name", "color": "blue|green|yellow|red|pink|purple|cyan|orange|grey", "tabIds": [1, 2, 3]}
+]
+
+JSON array only, no other text.`;
+
+  try {
+    const response = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + cleanApiKey,
+      },
+      body: JSON.stringify({
+        model: 'qwen-flash',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 2000,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`API error: ${response.status} - ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    if (data.choices?.[0]?.message?.content) {
+      const content = data.choices[0].message.content;
+      // Extract JSON from response
+      const jsonMatch = content.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        const groups = JSON.parse(jsonMatch[0]);
+        return Array.isArray(groups) ? groups : [];
+      }
+      return [];
+    }
+
+    return [];
+  } catch (error) {
+    console.error('[TabTidy] Qwen API error:', error);
+    throw error;
+  }
+}
+
 console.log('[TabTidy] service worker loaded', new Date().toISOString());
 
 const STORAGE_KEYS = {
   hostStats: 'hostStats_v1',
   tabMeta: 'tabMeta_v1',
   lastClosed: 'lastClosed_v1',
+  dashscopeApiKey: 'dashscopeApiKey_v1',
 };
 
 let _cacheLoaded = false;
@@ -619,7 +708,85 @@ function buildPlanAiStub(tabs, settings) {
 function buildPlan(tabs, settings) {
   const engine = String(settings.decisionEngine ?? DEFAULT_SETTINGS.decisionEngine);
   if (engine === 'ai_stub') return buildPlanAiStub(tabs, settings);
+  if (engine === 'ai_clean') return buildPlanAiClean(tabs, settings);
   return buildPlanRules(tabs, settings);
+}
+
+async function buildPlanAiClean(tabs, settings) {
+  const tNow = nowMs();
+  const apiKey = await getDashscopeApiKey();
+
+  const validTabs = (tabs ?? []).filter((t) => {
+    if (typeof t?.id !== 'number') return false;
+    if (t.active) return false;
+    if (settings.keepPinned && t.pinned) return false;
+    if (isInternalOrProtected(t, settings)) return false;
+    return true;
+  });
+
+  let groups = [];
+  let aiError = null;
+
+  if (apiKey && validTabs.length >= 2) {
+    try {
+      groups = await callQwenForGrouping(validTabs, apiKey);
+    } catch (e) {
+      aiError = String(e?.message || e);
+    }
+  }
+
+  const actions = [];
+
+  for (const g of groups) {
+    if (!g?.title || !Array.isArray(g?.tabIds)) continue;
+
+    const validTabIds = g.tabIds.filter((id) => typeof id === 'number');
+
+    if (validTabIds.length < 2) continue;
+
+    // Determine color
+    let color = g.color || 'blue';
+    const validColors = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'];
+    if (!validColors.includes(color)) color = 'blue';
+
+    actions.push({
+      type: 'group_tabs',
+      title: String(g.title).substring(0, 100),
+      color,
+      collapsed: false,
+      tabIds: validTabIds,
+    });
+  }
+
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    settings: {
+      ...settings,
+      preset: 'ai_clean',
+    },
+    stats: {
+      totalTabs: tabs?.length || 0,
+      toClose: 0,
+      groups: actions.filter((a) => a.type === 'group_tabs').length,
+      toGroupTabs: actions
+        .filter((a) => a.type === 'group_tabs')
+        .reduce((acc, g) => acc + (g.tabIds?.length || 0), 0),
+      actions: actions.length,
+    },
+    actions,
+    ai: {
+      enabled: !!apiKey,
+      error: aiError,
+      tabCount: validTabs.length,
+    },
+    debug: {
+      decisionEngine: 'ai_clean',
+      tabCount: tabs?.length || 0,
+      aiEnabled: !!apiKey,
+      aiError,
+    },
+  };
 }
 
 async function planForCurrentWindow() {
@@ -733,12 +900,16 @@ async function applyPlan(plan) {
     ...(normalized?.settings ?? {}),
   };
 
-  const maxClosePerRun = Math.max(0, Number(effectiveSettings.maxClosePerRun ?? DEFAULT_SETTINGS.maxClosePerRun) || 0);
+  // For AI Clean mode, skip all close actions
+  const isAiClean = effectiveSettings.preset === 'ai_clean';
+  const maxClosePerRun = isAiClean ? 0 : Math.max(0, Number(effectiveSettings.maxClosePerRun ?? DEFAULT_SETTINGS.maxClosePerRun) || 0);
 
   // Close first to reduce noise.
   const closeCandidates = [];
   for (const a of actions) {
     if (a?.type !== 'close_tabs') continue;
+    // Skip closing in AI Clean mode
+    if (isAiClean) continue;
     const items = Array.isArray(a.items) ? a.items : [];
     if (items.length) {
       for (const it of items) {
@@ -882,6 +1053,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'set_settings') {
       await setSettings(msg.patch ?? {});
       sendResponse({ ok: true, settings: await getSettings() });
+      return;
+    }
+    if (msg?.type === 'set_api_key') {
+      const key = msg?.apiKey ?? '';
+      if (key) {
+        await chrome.storage.local.set({ [STORAGE_KEYS.dashscopeApiKey]: key });
+      } else {
+        await chrome.storage.local.remove([STORAGE_KEYS.dashscopeApiKey]);
+      }
+      sendResponse({ ok: true });
+      return;
+    }
+    if (msg?.type === 'get_api_key') {
+      const key = await getDashscopeApiKey();
+      sendResponse({ ok: true, apiKey: key });
       return;
     }
     if (msg?.type === 'plan') {
